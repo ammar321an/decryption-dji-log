@@ -6,13 +6,11 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 interface DroneLogEntry {
-  timestamp: string;
-  latitude: number;
+  date: string;
+  time: string;
   longitude: number;
-  altitude: number;
-  speed: number;
-  battery: number;
-  gpsSignal: number;
+  latitude: number;
+  flytime: string;
 }
 
 interface ProcessingStats {
@@ -74,15 +72,15 @@ class DJILogConverter {
     return this.decryptWithFallbackMethod(filePath);
   }
 
-  // Method 1: Using DJI Log Binary (Most Reliable)
-  async useDJILogBinary(filePath: string): Promise<DroneLogEntry[]> {
+    // Method 1: Using DJI Log Binary (Most Reliable)
+    async useDJILogBinary(filePath: string): Promise<DroneLogEntry[]> {
     const { exec } = require('child_process');
     const { promisify } = require('util');
     const execAsync = promisify(exec);
 
     const binaryPath = path.join(__dirname, 'dji-log.exe');
     if (!fs.existsSync(binaryPath)) {
-      throw new Error('dji-log.exe not found. Download from https://github.com/lvauvillier/dji-log-parser/releases');
+        throw new Error('dji-log.exe not found. Download from https://github.com/lvauvillier/dji-log-parser/releases');
     }
 
     console.log('🔧 Using DJI log binary...');
@@ -91,34 +89,91 @@ class DJILogConverter {
     const outputFile = path.join(__dirname, `temp-${timestamp}.csv`);
     
     try {
-      let command = `"${binaryPath}"`;
-      if (this.apiKey) {
+        // Force CSV output to avoid JSON parsing issues
+        let command = `"${binaryPath}"`;
+        if (this.apiKey) {
         command += ` --api-key "${this.apiKey}"`;
-      }
-      command += ` --csv "${outputFile}" "${filePath}"`;
+        }
+        command += ` --csv "${outputFile}" "${filePath}"`;
 
-      console.log('⚙️  Executing DJI parser...');
-      const { stdout, stderr } = await execAsync(command, { timeout: 30000 });
-      
-      if (stderr && !stderr.includes('warning')) {
+        console.log('⚙️  Executing DJI parser for CSV output...');
+        const { stdout, stderr } = await execAsync(command, { timeout: 30000 });
+        
+        if (stderr && !stderr.includes('warning')) {
         console.warn('⚠️  Parser warnings:', stderr);
-      }
+        }
 
-      if (fs.existsSync(outputFile)) {
+        if (fs.existsSync(outputFile)) {
         const csvData = fs.readFileSync(outputFile, 'utf8');
         fs.unlinkSync(outputFile); // Clean up
         return this.parseCSVOutput(csvData);
-      } else {
+        } else {
         throw new Error('CSV output file was not generated');
-      }
+        }
     } catch (error) {
-      // Clean up on error
-      if (fs.existsSync(outputFile)) {
+        // Clean up on error
+        if (fs.existsSync(outputFile)) {
         fs.unlinkSync(outputFile);
-      }
-      throw error;
+        }
+        throw new Error(`Binary execution failed: ${this.getErrorMessage(error)}`);
     }
-  }
+    }
+
+    // Parse JSON output from binary
+    parseJSONOutput(jsonData: string): DroneLogEntry[] {
+    try {
+        const data = JSON.parse(jsonData);
+        
+        if (!data.frames || !Array.isArray(data.frames)) {
+        console.warn('⚠️  No frames found in JSON data');
+        return [];
+        }
+
+        console.log(`📋 Found ${data.frames.length} frames in JSON data`);
+
+        // First, collect all valid frames with timestamps
+        const validFrames = data.frames.filter((frame: any) => 
+        frame.custom?.dateTime && 
+        frame.custom.dateTime !== "1970-01-01T00:00:00Z"
+        );
+
+        if (validFrames.length === 0) {
+        console.warn('⚠️  No valid timestamps found');
+        return [];
+        }
+
+        // Sort frames by timestamp to ensure correct order
+        validFrames.sort((a: any, b: any) => 
+        new Date(a.custom.dateTime).getTime() - new Date(b.custom.dateTime).getTime()
+        );
+
+        const firstTimestamp = new Date(validFrames[0].custom.dateTime);
+        
+        // Map to entries with proper sequential timing
+        const entries: DroneLogEntry[] = validFrames.map((frame: any, index: number) => {
+        const currentTime = new Date(frame.custom.dateTime);
+        const relativeTimeSeconds = (currentTime.getTime() - firstTimestamp.getTime()) / 1000;
+        
+        // Convert to KL timezone for display
+        const { date, time } = this.formatTimestampToKL(frame.custom.dateTime);
+        
+        return {
+            date,
+            time,
+            longitude: frame.osd?.longitude || 0,
+            latitude: frame.osd?.latitude || 0,
+            flytime: this.formatFlytime(relativeTimeSeconds)
+        };
+        });
+
+        console.log(`✅ Successfully parsed ${entries.length} entries`);
+        console.log(`📊 Time range: ${entries[0]?.flytime} to ${entries[entries.length-1]?.flytime}`);
+        return entries;
+    } catch (error) {
+        console.warn('⚠️  Failed to parse JSON output, trying CSV fallback...');
+        return this.parseCSVOutput(jsonData);
+    }
+    }
 
   // Method 2: Using npm package
   async useNpmPackage(filePath: string): Promise<DroneLogEntry[]> {
@@ -150,46 +205,44 @@ class DJILogConverter {
     }
   }
 
-  // Parse CSV output from binary
-  parseCSVOutput(csvData: string): DroneLogEntry[] {
+    // Parse CSV output from binary (fallback method)
+    parseCSVOutput(csvData: string): DroneLogEntry[] {
     const lines = csvData.trim().split('\n');
     if (lines.length < 2) {
-      throw new Error('No data in CSV output');
+        throw new Error('No data in CSV output');
     }
 
-    const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, ''));
+    console.log(`📋 Processing ${lines.length - 1} CSV lines`);
+
+    // Parse all valid entries without timestamp-based deduplication
     const entries: DroneLogEntry[] = [];
-
+    
     for (let i = 1; i < lines.length; i++) {
-      try {
+        try {
         const values = this.parseCSVLine(lines[i]);
-        const entry: any = {};
+        
+        if (values.length >= 4 && values[0] && values[0] !== "1970-01-01T00:00:00Z") {
+            // Calculate relative time based on row position (0.1s intervals)
+            const relativeTimeSeconds = (i - 1) * 0.1;
+            
+            const { date, time } = this.formatTimestampToKL(values[0]);
 
-        headers.forEach((header, index) => {
-          if (values[index] !== undefined) {
-            entry[header] = values[index];
-          }
-        });
-
-        // Map to our standard format with better field matching
-        const standardEntry: DroneLogEntry = {
-          timestamp: this.extractField(entry, ['timestamp', 'datetime', 'time']) || new Date().toISOString(),
-          latitude: this.extractNumericField(entry, ['latitude', 'lat', 'osd.latitude', 'custom.date.lat']),
-          longitude: this.extractNumericField(entry, ['longitude', 'lng', 'lon', 'osd.longitude', 'custom.date.lng']),
-          altitude: this.extractNumericField(entry, ['altitude', 'alt', 'osd.altitude', 'custom.date.altitude']),
-          speed: this.extractNumericField(entry, ['speed', 'velocity', 'osd.hspeed', 'osd.vspeed', 'custom.date.hspeed']),
-          battery: this.extractNumericField(entry, ['battery', 'battery.percent', 'osd.battery', 'custom.date.battery']),
-          gpsSignal: this.extractNumericField(entry, ['gpssignal', 'gps', 'satellites', 'osd.gpslevel', 'custom.date.gpslevel'])
-        };
-
-        entries.push(standardEntry);
-      } catch (error) {
+            entries.push({
+            date,
+            time,
+            longitude: parseFloat(values[3]) || 0,  // Adjust column indices based on your CSV
+            latitude: parseFloat(values[2]) || 0,
+            flytime: this.formatFlytime(relativeTimeSeconds)
+            });
+        }
+        } catch (error) {
         console.warn(`⚠️  Skipping invalid CSV line ${i + 1}`);
-      }
+        }
     }
 
+    console.log(`✅ Successfully parsed ${entries.length} entries`);
     return entries;
-  }
+    }
 
   // Enhanced CSV line parsing
   private parseCSVLine(line: string): string[] {
@@ -239,15 +292,31 @@ class DJILogConverter {
 
   // Convert frames to standard entries
   convertFramesToEntries(frames: any[]): DroneLogEntry[] {
-    return frames.map((frame: any) => ({
-      timestamp: frame.timestamp || frame.datetime || new Date().toISOString(),
-      latitude: parseFloat(frame.latitude || frame.lat || frame.osd?.latitude || 0),
-      longitude: parseFloat(frame.longitude || frame.lng || frame.lon || frame.osd?.longitude || 0),
-      altitude: parseFloat(frame.altitude || frame.alt || frame.osd?.altitude || 0),
-      speed: parseFloat(frame.speed || frame.velocity || frame.osd?.hSpeed || frame.osd?.vSpeed || 0),
-      battery: parseFloat(frame.battery || frame.batteryPercent || frame.osd?.battery || 0),
-      gpsSignal: parseFloat(frame.gpsSignal || frame.satelliteCount || frame.osd?.gpsLevel || 0)
-    }));
+    let firstTimestamp: Date | null = null;
+    
+    return frames.map((frame: any, index: number) => {
+      const timestampStr = frame.timestamp || frame.datetime || frame.custom?.dateTime || new Date().toISOString();
+      const currentTime = new Date(timestampStr);
+      
+      // Set first timestamp as reference
+      if (index === 0) {
+        firstTimestamp = currentTime;
+      }
+      
+      // Calculate relative time from first frame
+      const relativeTimeSeconds = firstTimestamp ? 
+        (currentTime.getTime() - firstTimestamp.getTime()) / 1000 : 0;
+      
+      const { date, time } = this.formatTimestampToKL(timestampStr);
+      
+      return {
+        date,
+        time,
+        longitude: parseFloat(frame.longitude || frame.lng || frame.lon || frame.osd?.longitude || 0),
+        latitude: parseFloat(frame.latitude || frame.lat || frame.osd?.latitude || 0),
+        flytime: this.formatFlytime(relativeTimeSeconds)
+      };
+    });
   }
 
   // Fallback method for manual decryption attempts
@@ -332,13 +401,19 @@ class DJILogConverter {
   parseLogData(logContent: string): DroneLogEntry[] {
     const entries: DroneLogEntry[] = [];
     const lines = logContent.split('\n');
+    let firstTimestamp: Date | null = null;
 
-    for (const line of lines) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
       if (line.trim() === '') continue;
 
       try {
-        const entry = this.parseLogLine(line);
+        const entry = this.parseLogLine(line, i, firstTimestamp);
         if (entry) {
+          // Set first timestamp reference
+          if (i === 0 && !firstTimestamp) {
+            firstTimestamp = new Date(entry.date + 'T' + entry.time);
+          }
           entries.push(entry);
         }
       } catch (error) {
@@ -350,31 +425,49 @@ class DJILogConverter {
   }
 
   // Enhanced log line parsing
-  private parseLogLine(line: string): DroneLogEntry | null {
+  private parseLogLine(line: string, index: number = 0, firstTimestamp: Date | null = null): DroneLogEntry | null {
     // Try JSON format first
     try {
       const jsonData = JSON.parse(line);
+      const timestampStr = jsonData.timestamp || jsonData.time || jsonData.datetime || jsonData.custom?.dateTime || new Date().toISOString();
+      const currentTime = new Date(timestampStr);
+      
+      // Calculate relative time if we have a first timestamp
+      let relativeTimeSeconds = 0;
+      if (firstTimestamp) {
+        relativeTimeSeconds = (currentTime.getTime() - firstTimestamp.getTime()) / 1000;
+      }
+      
+      const { date, time } = this.formatTimestampToKL(timestampStr);
+      
       return {
-        timestamp: jsonData.timestamp || jsonData.time || jsonData.datetime || new Date().toISOString(),
-        latitude: parseFloat(jsonData.latitude || jsonData.lat || 0),
-        longitude: parseFloat(jsonData.longitude || jsonData.lon || jsonData.lng || 0),
-        altitude: parseFloat(jsonData.altitude || jsonData.alt || 0),
-        speed: parseFloat(jsonData.speed || jsonData.velocity || jsonData.vel || 0),
-        battery: parseFloat(jsonData.battery || jsonData.bat || jsonData.batteryLevel || 0),
-        gpsSignal: parseFloat(jsonData.gpsSignal || jsonData.gps || jsonData.satelliteCount || 0)
+        date,
+        time,
+        longitude: parseFloat(jsonData.longitude || jsonData.lon || jsonData.lng || jsonData.osd?.longitude || 0),
+        latitude: parseFloat(jsonData.latitude || jsonData.lat || jsonData.osd?.latitude || 0),
+        flytime: this.formatFlytime(relativeTimeSeconds)
       };
     } catch (e) {
       // Try comma-separated values
       const parts = line.split(',');
       if (parts.length >= 3) {
+        const timestampStr = parts[0] || new Date().toISOString();
+        const currentTime = new Date(timestampStr);
+        
+        // Calculate relative time if we have a first timestamp
+        let relativeTimeSeconds = 0;
+        if (firstTimestamp) {
+          relativeTimeSeconds = (currentTime.getTime() - firstTimestamp.getTime()) / 1000;
+        }
+        
+        const { date, time } = this.formatTimestampToKL(timestampStr);
+        
         return {
-          timestamp: parts[0] || new Date().toISOString(),
-          latitude: parseFloat(parts[1]) || 0,
-          longitude: parseFloat(parts[2]) || 0,
-          altitude: parseFloat(parts[3]) || 0,
-          speed: parseFloat(parts[4]) || 0,
-          battery: parseFloat(parts[5]) || 0,
-          gpsSignal: parseFloat(parts[6]) || 0
+          date,
+          time,
+          longitude: parseFloat(parts[1]) || 0,
+          latitude: parseFloat(parts[2]) || 0,
+          flytime: this.formatFlytime(relativeTimeSeconds)
         };
       }
     }
@@ -382,28 +475,28 @@ class DJILogConverter {
     return null;
   }
 
-  // Enhanced CSV output with better formatting
-  convertToCSV(entries: DroneLogEntry[]): string {
+    // Enhanced CSV output with better formatting
+    convertToCSV(entries: DroneLogEntry[]): string {
     if (entries.length === 0) {
-      return 'timestamp,latitude,longitude,altitude,speed,battery,gpsSignal\n';
+        return 'date,time,longitude,latitude,flytime\n';
     }
 
     const headers = Object.keys(entries[0]).join(',');
     const rows = entries.map(entry => 
-      Object.values(entry).map(value => {
+        Object.values(entry).map(value => {
         if (typeof value === 'string') {
-          // Handle timestamps and strings
-          return `"${value}"`;
+            // Handle dates, times, and flytime strings
+            return `"${value}"`;
         } else if (typeof value === 'number') {
-          // Format numbers to reasonable precision
-          return Number.isInteger(value) ? value.toString() : value.toFixed(6);
+            // Use full precision for coordinates (10+ decimal places)
+            return value.toString();
         }
         return value;
-      }).join(',')
+        }).join(',')
     );
 
     return [headers, ...rows].join('\n');
-  }
+    }
 
   // Enhanced main processing function
   async processAllLogs(): Promise<void> {
@@ -512,6 +605,47 @@ class DJILogConverter {
       return (error as { message: string }).message;
     }
     return String(error);
+  }
+
+  // Convert timestamp to Kuala Lumpur timezone and split date/time
+    private formatTimestampToKL(timestamp: string): { date: string; time: string } {
+    try {
+        const date = new Date(timestamp);
+        
+        // Don't modify the original timestamp for flytime calculation
+        // Just format for display in KL timezone
+        const klTime = new Date(date.getTime() + (8 * 60 * 60 * 1000));
+        
+        // Format date as YYYY-MM-DD
+        const dateStr = klTime.toISOString().split('T')[0];
+        
+        // Format time as HH:MM:SS (remove milliseconds for cleaner display)
+        const timeStr = klTime.toISOString().split('T')[1].substring(0, 8);
+        
+        return {
+        date: dateStr,
+        time: timeStr
+        };
+    } catch (error) {
+        // Fallback if timestamp parsing fails
+        const now = new Date();
+        const klTime = new Date(now.getTime() + (8 * 60 * 60 * 1000));
+        
+        return {
+        date: klTime.toISOString().split('T')[0],
+        time: klTime.toISOString().split('T')[1].substring(0, 8)
+        };
+    }
+    }
+
+  // Format flytime to seconds with 's' suffix
+  private formatFlytime(seconds: number): string {
+    if (isNaN(seconds) || seconds < 0) {
+      return '0.0s';
+    }
+    
+    // Round to 1 decimal place and add 's' suffix
+    return `${seconds.toFixed(1)}s`;
   }
 }
 
