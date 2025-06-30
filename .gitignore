@@ -5,13 +5,6 @@ node_modules/
 dist/
 build/
 
-# Output files
-csv-output/
-*.csv
-
-# Log files
-*.log
-
 # Environment variables
 .env
 
