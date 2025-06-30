@@ -1,0 +1,26 @@
+{
+  "name": "decrypt-drone-data",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/dji-converter.js",
+    "dev": "ts-node dji-converter.ts",
+    "watch": "nodemon --exec ts-node dji-converter.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "description": "",
+  "dependencies": {
+    "@types/node": "^24.0.7",
+    "dotenv": "^17.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  },
+  "devDependencies": {
+    "@types/dotenv": "^6.1.1",
+    "nodemon": "^3.1.10"
+  }
+}

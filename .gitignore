@@ -1,0 +1,27 @@
+# Node modules
+node_modules/
+
+# Build output (if any)
+dist/
+build/
+
+# Output files
+csv-output/
+*.csv
+
+# Log files
+*.log
+
+# Environment variables
+.env
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# TypeScript cache
+*.tsbuildinfo
+
+# DJI flight logs
+drone-logs/*.txt
+
